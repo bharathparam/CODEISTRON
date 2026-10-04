@@ -18,56 +18,79 @@ class ChatRequest(BaseModel):
     prompt: str
     model: str
 
+import httpx
+
 @app.get("/api/status")
 async def get_status():
+    global node_process
+    is_local = node_process and node_process.poll() is None
+    
+    # Try fetching real DHT health stats
+    active_peers = 0
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get("https://health.petals.dev/api/v1/state")
+            if resp.status_code == 200:
+                active_peers = len(resp.json().get("model_reports", [{}])[0].get("server_rows", []))
+    except:
+        pass
+
     return {
-        "network": "Private LAN",
+        "network": "Private LAN" if is_local else "Public Swarm",
         "dht_status": "Connected",
-        "local_rank": "Node 3 (M2 Max)",
-        "active_peers": 3,
-        "throughput_tks": 14.2
+        "local_rank": "Active Node" if is_local else "Client Only",
+        "active_peers": active_peers if not is_local else 1,
+        "throughput_tks": "Dynamic"
     }
 
 @app.get("/api/topology")
 async def get_topology():
-    return {
-        "nodes": [
-            {"id": "mac-studio", "name": "Mac Studio", "ip": "10.1.1.4", "blocks": "0-11", "active": True},
-            {"id": "win-rtx", "name": "Win RTX 4090", "ip": "10.1.1.9", "blocks": "12-19", "active": True},
-            {"id": "ubuntu", "name": "Ubuntu CPU", "ip": "10.1.1.2", "blocks": "20-23", "active": False}
-        ],
-        "stats": {
-            "total_blocks": 24,
-            "latency_ms": 12,
-            "dht_peers": 3
-        }
-    }
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get("https://health.petals.dev/api/v1/state")
+            data = resp.json()
+            nodes = []
+            for model in data.get("model_reports", []):
+                for row in model.get("server_rows", []):
+                    nodes.append({
+                        "id": row.get("peer_id", "")[:8],
+                        "name": row.get("peer_id", "")[:8],
+                        "ip": "Public DHT Node",
+                        "blocks": row.get("span", "0-0"),
+                        "active": row.get("state", "") == "online"
+                    })
+            return {
+                "nodes": nodes[:50],
+                "stats": {
+                    "total_blocks": len(nodes) * 5, # Estimate
+                    "latency_ms": 45,
+                    "dht_peers": len(nodes)
+                }
+            }
+    except Exception as e:
+        return {"nodes": [], "stats": {"total_blocks": 0, "latency_ms": 0, "dht_peers": 0}}
 
 @app.get("/api/models")
 async def get_models():
-    return [
-        {
-            "id": "bloomz-560m",
-            "name": "BLOOMZ",
-            "org": "bigscience/bloomz-560m",
-            "status": "24/24 Blocks",
-            "desc": "Cross-lingual generalization model. Lightweight and fully loaded in the local swarm.",
-            "params": "560M",
-            "vram": "~1.2GB",
-            "active": True
-        },
-        {
-            "id": "llama-3-8b",
-            "name": "Llama 3.1 8B",
-            "org": "meta-llama/Meta-Llama-3.1-8B",
-            "status": "18/32 Blocks",
-            "desc": "Highly capable instruct model. 18 of 32 blocks loaded. Add one more GPU peer to complete.",
-            "params": "8B",
-            "vram": "~16GB",
-            "active": False,
-            "warning": True
-        }
-    ]
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get("https://health.petals.dev/api/v1/state")
+            data = resp.json()
+            models = []
+            for m in data.get("model_reports", []):
+                models.append({
+                    "id": m["name"],
+                    "name": m["name"].split("/")[-1],
+                    "org": m["name"],
+                    "status": f"{m.get('loaded_ro_blocks', 0)} / {m.get('num_blocks', 1)} Blocks",
+                    "desc": "Fetched directly from active Petals Swarm DHT.",
+                    "params": "Dynamic",
+                    "vram": "Dynamic",
+                    "active": m.get("state") == "healthy"
+                })
+            return models
+    except Exception as e:
+        return []
 
 from fastapi.responses import StreamingResponse
 
@@ -119,11 +142,19 @@ def run_distributed_training(config: TrainRequest):
         
         optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
         
-        # Dummy training data for the UI
-        texts = [
-            "Petals is a decentralized network for running large language models.",
-            "It allows fine-tuning over the network without owning a massive GPU."
-        ]
+        # Use uploaded dataset
+        if config.dataset and len(config.dataset.strip()) > 0:
+            # simple split by newlines for demo purposes
+            texts = [line.strip() for line in config.dataset.split('\n') if line.strip()]
+            if not texts:
+                 texts = ["Default training data: Petals is a decentralized network."]
+        else:
+            texts = [
+                "Petals is a decentralized network for running large language models.",
+                "It allows fine-tuning over the network without owning a massive GPU."
+            ]
+        
+        training_state["log"].append(f"Loaded dataset with {len(texts)} samples.")
         
         training_state["log"].append("Starting Epochs...")
         epochs = training_state["max_epochs"]
@@ -177,13 +208,48 @@ async def stop_train():
     training_state["is_training"] = False
     return {"status": "stopped"}
 
+# Cache inference model globally so it isn't repeatedly loaded
+inference_model = None
+inference_tokenizer = None
+current_inference_model_name = ""
+
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
+    global inference_model, inference_tokenizer, current_inference_model_name
+    
+    # Setup real model generation
     async def generate():
-        response_text = "Generating this text requires hopping through 24 blocks across 3 different physical machines in your local area network. Petals routes the tensors automatically!"
-        for char in response_text:
-            yield char
-            await asyncio.sleep(0.02)
+        try:
+            from transformers import AutoTokenizer
+            from petals import AutoDistributedModelForCausalLM
+            
+            yield "Connecting to Petals Swarm for true distributed generation...\n\n"
+            await asyncio.sleep(0.1)
+            
+            global inference_model, inference_tokenizer, current_inference_model_name
+            if inference_model is None or current_inference_model_name != req.model:
+                yield f"[Loading {req.model} tokenizer...]\n"
+                inference_tokenizer = AutoTokenizer.from_pretrained(req.model)
+                yield f"[Connecting to Petals DHT for {req.model} blocks...]\n"
+                inference_model = AutoDistributedModelForCausalLM.from_pretrained(req.model)
+                current_inference_model_name = req.model
+
+            yield "[Running distributed forward pass...]\n\n"
+            
+            inputs = inference_tokenizer(req.prompt, return_tensors="pt")
+            # For streaming, we need TextIteratorStreamer or just standard generation
+            # To keep it completely authentic and avoid threading issues in standard generator, we'll run standard generation
+            outputs = inference_model.generate(**inputs, max_new_tokens=50)
+            text = inference_tokenizer.decode(outputs[0])
+            
+            # Since the model output is already computed, we yield it
+            for char in text:
+                yield char
+                await asyncio.sleep(0.01)
+                
+        except Exception as e:
+            yield f"\n\n[Error running distributed generation: {str(e)}]"
+
     return StreamingResponse(generate(), media_type="text/plain")
 
 import subprocess

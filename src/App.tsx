@@ -696,14 +696,18 @@ function TrainingView() {
 
   const startTraining = async () => {
     try {
+      const dataset = (document.getElementById('dataset-input') as HTMLTextAreaElement)?.value || '';
+      const lr = parseFloat((document.getElementById('lr-input') as HTMLInputElement)?.value || '3e-4');
+      const lora = parseInt((document.getElementById('lora-input') as HTMLInputElement)?.value || '16');
+
       await fetch('/api/train/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model: 'bigscience/bloomz-560m',
-          dataset: 'custom_chat_data.jsonl',
-          learning_rate: 3e-4,
-          lora_rank: 16
+          dataset: dataset,
+          learning_rate: lr,
+          lora_rank: lora
         })
       });
       setIsTraining(true);
@@ -820,14 +824,23 @@ function TrainingView() {
             </select>
           </div>
 
+          <div>
+            <label className="font-mono text-xs text-[#888] block mb-2">Dataset (JSONL or Text lines)</label>
+            <textarea 
+              id="dataset-input"
+              className="w-full h-24 bg-[#111] border border-[#1e1e2e] rounded-lg p-3 text-sm text-[#f0f0f0] outline-none font-mono resize-none focus:border-[#ffb86c]/50 transition-colors"
+              placeholder="Paste your training data here...&#10;Each line will be treated as a separate training sequence."
+            ></textarea>
+          </div>
+
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="font-mono text-xs text-[#888] block mb-2">Learning Rate</label>
-              <input type="text" defaultValue="3e-4" className="w-full bg-[#111] border border-[#1e1e2e] rounded-lg p-3 text-sm text-[#f0f0f0] outline-none font-mono" />
+              <input id="lr-input" type="text" defaultValue="3e-4" className="w-full bg-[#111] border border-[#1e1e2e] rounded-lg p-3 text-sm text-[#f0f0f0] outline-none font-mono" />
             </div>
             <div>
               <label className="font-mono text-xs text-[#888] block mb-2">LoRA Rank (r)</label>
-              <input type="text" defaultValue="16" className="w-full bg-[#111] border border-[#1e1e2e] rounded-lg p-3 text-sm text-[#f0f0f0] outline-none font-mono" />
+              <input id="lora-input" type="text" defaultValue="16" className="w-full bg-[#111] border border-[#1e1e2e] rounded-lg p-3 text-sm text-[#f0f0f0] outline-none font-mono" />
             </div>
           </div>
           
