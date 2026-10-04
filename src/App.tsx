@@ -263,7 +263,62 @@ function MainDashboard() {
             {activeTab === 'chat' && <InferenceChatView key="chat" />}
             {activeTab === 'training' && <TrainingView key="training" />}
             {activeTab === 'models' && <ModelsView key="models" />}
+            {activeTab === 'config' && <ConfigView key="config" />}
           </AnimatePresence>
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
+function ConfigView() {
+  const [nodeStatus, setNodeStatus] = useState("Not Running");
+
+  const startNode = async () => {
+    setNodeStatus("Starting Petals server in subprocess...");
+    try {
+      await fetch('/api/node/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'bigscience/bloomz-560m', num_blocks: 12 })
+      });
+      setNodeStatus("Running (Local Petals Node online)");
+    } catch (e) {
+      setNodeStatus("Error starting node");
+    }
+  };
+
+  const stopNode = async () => {
+    try {
+      await fetch('/api/node/stop', { method: 'POST' });
+      setNodeStatus("Not Running");
+    } catch (e) {}
+  };
+
+  return (
+    <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="h-full flex flex-col gap-6 max-w-2xl mx-auto">
+      <div className="border border-[#1e1e2e] bg-[#0a0a0a]/80 p-8 rounded-2xl">
+        <h2 className="text-2xl font-semibold mb-2">Network Configuration</h2>
+        <p className="text-[#888] font-mono text-sm mb-8">Manage your private Swarm connection and local node instances.</p>
+
+        <div className="flex flex-col gap-6">
+          <div className="bg-[#111] border border-[#1e1e2e] p-6 rounded-xl">
+            <h3 className="text-lg font-mono mb-4 text-[#ff79c6]">Local Swarm Node</h3>
+            <p className="text-sm text-[#888] mb-4">Spin up a local Petals server on your machine to host model blocks for the private LAN swarm. This uses your specific clone at <span className="text-[#50fa7b]">/petals-main</span>.</p>
+            
+            <div className="font-mono text-xs bg-[#050505] p-3 rounded mb-4 text-[#555]">
+              Status: <span className={nodeStatus.includes("Running") ? "text-[#50fa7b]" : "text-[#ffb86c]"}>{nodeStatus}</span>
+            </div>
+
+            <div className="flex gap-4">
+              <button onClick={startNode} className="flex-1 py-3 bg-[#50fa7b]/10 border border-[#50fa7b]/30 text-[#50fa7b] rounded-lg hover:bg-[#50fa7b]/20 transition-all font-mono text-sm">
+                START LOCAL NODE
+              </button>
+              <button onClick={stopNode} className="flex-1 py-3 bg-red-500/10 border border-red-500/30 text-red-500 rounded-lg hover:bg-red-500/20 transition-all font-mono text-sm">
+                STOP NODE
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     </motion.div>
@@ -601,31 +656,79 @@ function ModelsView() {
 function TrainingView() {
   const [isTraining, setIsTraining] = useState(false);
   const [epoch, setEpoch] = useState(0);
+  const [loss, setLoss] = useState(100.0);
+  const [logs, setLogs] = useState<string[]>([]);
+  const [dataPoints, setDataPoints] = useState<{x: number, y: number}[]>([{x: 0, y: 100}]);
 
-  const dataPoints = Array.from({ length: 40 }).map((_, i) => ({
-    x: i * (100 / 39),
-    y: 90 * Math.exp(-i / 10) + Math.random() * 5 + 5
-  }));
   const pathD = `M 0,${100 - dataPoints[0].y} ` + dataPoints.map(p => `L ${p.x},${100 - p.y}`).join(' ');
 
+  const pollStatus = async () => {
+    try {
+      const res = await fetch('/api/train/status');
+      const data = await res.json();
+      setIsTraining(data.is_training);
+      setEpoch(data.epoch);
+      setLoss(data.loss);
+      setLogs(data.log);
+      
+      if (data.is_training || data.epoch > 0) {
+        setDataPoints(prev => {
+          const newPoints = [...prev];
+          // Simple visual scaling for UI (assuming max loss is 100)
+          const newY = Math.min(Math.max(data.loss, 0), 100);
+          const newX = (data.epoch / data.max_epochs) * 100;
+          
+          if (newPoints[newPoints.length - 1].x !== newX) {
+             newPoints.push({ x: newX, y: newY });
+          }
+          return newPoints;
+        });
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
   useEffect(() => {
-    if(!isTraining) return;
-    const interval = setInterval(() => {
-      setEpoch(p => {
-        if(p >= 100) { clearInterval(interval); setIsTraining(false); return 100; }
-        return p + 0.5;
-      });
-    }, 100);
+    const interval = setInterval(pollStatus, 1000);
     return () => clearInterval(interval);
-  }, [isTraining]);
+  }, []);
+
+  const startTraining = async () => {
+    try {
+      await fetch('/api/train/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'bigscience/bloomz-560m',
+          dataset: 'custom_chat_data.jsonl',
+          learning_rate: 3e-4,
+          lora_rank: 16
+        })
+      });
+      setIsTraining(true);
+      setDataPoints([{x: 0, y: 100}]);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const stopTraining = async () => {
+    try {
+      await fetch('/api/train/stop', { method: 'POST' });
+      setIsTraining(false);
+    } catch (e) {
+      console.error(e);
+    }
+  };
 
   return (
     <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="h-full flex gap-6">
       <div className="flex-[2] flex flex-col gap-6">
-        <div className="flex-1 border border-[#1e1e2e] bg-[#0a0a0a]/80 rounded-2xl p-6 relative overflow-hidden group">
-          <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top_right,rgba(255,184,108,0.1)_0%,transparent_70%)]" />
+        <div className="flex-1 border border-[#1e1e2e] bg-[#0a0a0a]/80 rounded-2xl p-6 relative overflow-hidden group flex flex-col">
+          <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top_right,rgba(255,184,108,0.1)_0%,transparent_70%)] pointer-events-none" />
           
-          <div className="flex justify-between items-center mb-8 relative z-10">
+          <div className="flex justify-between items-center mb-4 relative z-10">
             <h2 className="text-xl font-semibold text-[#f0f0f0] flex items-center gap-2">
               <TrendingDown className="text-[#ffb86c]" /> Training Loss (LoRA)
             </h2>
@@ -640,8 +743,8 @@ function TrainingView() {
             )}
           </div>
 
-          <div className="relative w-full h-[60%] flex items-end">
-            <svg className="w-full h-full overflow-visible" viewBox="0 0 100 100" preserveAspectRatio="none">
+          <div className="relative w-full flex-1 flex items-end">
+            <svg className="absolute inset-0 w-full h-full overflow-visible" viewBox="0 0 100 100" preserveAspectRatio="none">
               <defs>
                 <linearGradient id="lossGradient" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="0%" stopColor="rgba(255,184,108,0.5)" />
@@ -653,16 +756,16 @@ function TrainingView() {
                 <line key={y} x1="0" y1={y} x2="100" y2={y} stroke="#1e1e2e" strokeWidth="0.5" strokeDasharray="2 2" />
               ))}
 
-              {isTraining && (
+              {(dataPoints.length > 1) && (
                 <>
                   <motion.path 
-                    initial={{ pathLength: 0 }} animate={{ pathLength: epoch / 100 }} transition={{ ease: "linear", duration: 0.1 }}
+                    initial={{ pathLength: 0 }} animate={{ pathLength: 1 }} transition={{ ease: "linear", duration: 0.1 }}
                     d={pathD} fill="none" stroke="#ffb86c" strokeWidth="1.5"
                     style={{ filter: 'drop-shadow(0 0 4px rgba(255,184,108,0.5))' }}
                   />
                   <motion.path 
-                    initial={{ clipPath: 'inset(0 100% 0 0)' }} animate={{ clipPath: `inset(0 ${100 - epoch}% 0 0)` }} transition={{ ease: "linear", duration: 0.1 }}
-                    d={`${pathD} L 100,100 L 0,100 Z`} fill="url(#lossGradient)" 
+                    initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+                    d={`${pathD} L ${dataPoints[dataPoints.length-1].x},100 L 0,100 Z`} fill="url(#lossGradient)" 
                   />
                 </>
               )}
@@ -671,7 +774,8 @@ function TrainingView() {
           
           <div className="flex justify-between font-mono text-[10px] text-[#555] mt-2">
             <span>Epoch 0</span>
-            <span>Epoch {Math.floor(epoch / 20)}/5</span>
+            <span className="text-[#ffb86c]">Current Loss: {loss.toFixed(4)}</span>
+            <span>Epoch {epoch}/10</span>
           </div>
         </div>
 
@@ -704,24 +808,16 @@ function TrainingView() {
         </div>
       </div>
 
-      <div className="flex-1 border border-[#1e1e2e] bg-[#0a0a0a]/80 rounded-2xl p-6 relative overflow-y-auto">
-        <h2 className="text-xl font-semibold text-[#f0f0f0] mb-8">Job Configuration</h2>
+      <div className="flex-1 border border-[#1e1e2e] bg-[#0a0a0a]/80 rounded-2xl p-6 relative flex flex-col">
+        <h2 className="text-xl font-semibold text-[#f0f0f0] mb-6">Job Configuration</h2>
         
-        <div className="flex flex-col gap-6">
+        <div className="flex flex-col gap-4 flex-1">
           <div>
             <label className="font-mono text-xs text-[#888] block mb-2">Base Model</label>
             <select className="w-full bg-[#111] border border-[#1e1e2e] rounded-lg p-3 text-sm text-[#f0f0f0] outline-none">
               <option>bigscience/bloomz-560m</option>
               <option>meta-llama/Meta-Llama-3.1-8B</option>
             </select>
-          </div>
-
-          <div>
-            <label className="font-mono text-xs text-[#888] block mb-2">Dataset</label>
-            <div className="w-full bg-[#111] border border-[#1e1e2e] border-dashed rounded-lg p-6 flex flex-col items-center justify-center gap-2 hover:bg-[#151515] transition-colors cursor-pointer text-[#888]">
-              <Database size={24} />
-              <span className="text-sm">custom_chat_data.jsonl</span>
-            </div>
           </div>
 
           <div className="grid grid-cols-2 gap-4">
@@ -734,14 +830,22 @@ function TrainingView() {
               <input type="text" defaultValue="16" className="w-full bg-[#111] border border-[#1e1e2e] rounded-lg p-3 text-sm text-[#f0f0f0] outline-none font-mono" />
             </div>
           </div>
+          
+          <div className="flex-1 bg-[#111] border border-[#1e1e2e] rounded-lg p-4 flex flex-col gap-2 overflow-y-auto font-mono text-[10px] text-[#888]">
+            {logs.map((log, i) => (
+              <div key={i}>{log}</div>
+            ))}
+            {logs.length === 0 && <div>Server log ready...</div>}
+            {isTraining && <div className="text-[#ffb86c] animate-pulse">Running backward pass...</div>}
+          </div>
 
-          <div className="pt-6 border-t border-[#1e1e2e] mt-auto">
+          <div className="pt-4 border-t border-[#1e1e2e] mt-auto">
             {isTraining ? (
-              <button onClick={() => { setIsTraining(false); setEpoch(0); }} className="w-full py-4 bg-red-500/10 border border-red-500/30 text-red-500 rounded-xl font-semibold tracking-wide hover:bg-red-500/20 transition-all">
+              <button onClick={stopTraining} className="w-full py-4 bg-red-500/10 border border-red-500/30 text-red-500 rounded-xl font-semibold tracking-wide hover:bg-red-500/20 transition-all">
                 STOP TRAINING
               </button>
             ) : (
-              <button onClick={() => { setIsTraining(true); setEpoch(0); }} className="w-full py-4 bg-[#ffb86c] text-[#000] rounded-xl font-semibold tracking-wide hover:bg-[#ffca94] transition-all shadow-[0_0_20px_rgba(255,184,108,0.2)]">
+              <button onClick={startTraining} className="w-full py-4 bg-[#ffb86c] text-[#000] rounded-xl font-semibold tracking-wide hover:bg-[#ffca94] transition-all shadow-[0_0_20px_rgba(255,184,108,0.2)]">
                 START DISTRIBUTED TRAINING
               </button>
             )}
